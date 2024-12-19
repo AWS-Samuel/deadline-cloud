@@ -6,8 +6,8 @@ tests the deadline.client.config settings
 
 import os
 import platform
-import subprocess
-from unittest.mock import patch, MagicMock
+import sys
+from unittest.mock import patch, MagicMock, call
 from pathlib import Path
 
 import boto3  # type: ignore[import]
@@ -273,32 +273,84 @@ def test_default_log_level():
     platform.system() != "Windows",
     reason="This test is for testing file permission changes in Windows.",
 )
-def test_windows_config_file_permissions(fresh_deadline_config) -> None:
-    config_file_path = config_file.get_config_file_path()
-    parent_dir = config_file_path.parent
-    subprocess.run(
+def test_reset_directory_permissions_windows() -> None:
+    """
+    Asserts the _reset_directory_permissions_windows configures the provided
+    folder with access only to the active user, the domain admin, and SYSTEM.
+    """
+    # GIVEN
+    import ntsecuritycon
+
+    win32security_mock = MagicMock()
+    sys.modules["win32security"] = win32security_mock
+
+    path = Path("C:/test/path")
+    system_sid, admin_sid, user_sid = MagicMock(), MagicMock(), MagicMock()
+    win32security_mock.ConvertStringSidToSid.side_effect = [admin_sid, system_sid]
+    win32security_mock.LookupAccountName.return_value = (user_sid, None, None)
+    dacl = win32security_mock.ACL.return_value
+    sd = win32security_mock.GetFileSecurity.return_value
+
+    # WHEN
+    config_file._reset_directory_permissions_windows(path)
+
+    # THEN
+    dacl.AddAccessAllowedAceEx.assert_has_calls(
         [
-            "icacls",
-            str(parent_dir),
-            "/grant",
-            "Everyone:(OI)(CI)(F)",
-            "/T",
+            call(
+                win32security_mock.ACL_REVISION,
+                ntsecuritycon.OBJECT_INHERIT_ACE | ntsecuritycon.CONTAINER_INHERIT_ACE,
+                ntsecuritycon.GENERIC_ALL,
+                sid,
+            )
+            for sid in [user_sid, admin_sid, system_sid]
         ],
-        check=True,
+        any_order=True,
+    )
+    assert dacl.AddAccessAllowedAceEx.call_count == 3  # Confirm no additional access was added
+    win32security_mock.GetFileSecurity.assert_called_with(
+        str(path.resolve()), win32security_mock.DACL_SECURITY_INFORMATION
+    )
+    sd.SetSecurityDescriptorDacl.assert_called_with(1, dacl, 0)
+    win32security_mock.SetFileSecurity.assert_called_with(
+        str(path.resolve()), win32security_mock.DACL_SECURITY_INFORMATION, sd
     )
 
-    config_file.set_setting("defaults.aws_profile_name", "goodguyprofile")
 
-    result = subprocess.run(
-        [
-            "icacls",
-            str(config_file_path),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    assert "Everyone" not in result.stdout
+@pytest.mark.skipif(
+    platform.system() != "Windows",
+    reason="This test is for testing file permission changes in Windows.",
+)
+@pytest.mark.parametrize("parent_exists", [True, False])
+@patch.object(config_file, "_reset_directory_permissions_windows")
+@patch.object(config_file, "get_config_file_path")
+@patch.object(config_file, "os")
+@patch.object(config_file.tempfile, "mkstemp", return_value=(MagicMock(), MagicMock()))
+def test_write_config_directory_permission_windows(
+    mock_tempfile,
+    mock_os,
+    mock_get_config_file_path,
+    mock_reset_directory_permissions,
+    parent_exists,
+):
+    # GIVEN
+    mock_get_config_file_path.return_value = MagicMock()
+    mock_get_config_file_path.return_value.parent.exists.return_value = parent_exists
+
+    # WHEN
+    config_file.write_config(MagicMock())
+
+    # THEN
+    if parent_exists:
+        mock_get_config_file_path.return_value.parent.mkdir.assert_not_called()
+        mock_reset_directory_permissions.assert_not_called()
+    else:
+        mock_get_config_file_path.return_value.parent.mkdir.assert_called_with(
+            parents=True, exist_ok=True
+        )
+        mock_reset_directory_permissions.assert_called_once_with(
+            mock_get_config_file_path.return_value.parent
+        )
 
 
 @pytest.mark.skipif(
