@@ -6,8 +6,9 @@ tests the deadline.client.config settings
 
 import os
 import platform
-import sys
-from unittest.mock import patch, MagicMock, call
+import getpass
+import tempfile
+from unittest.mock import patch, MagicMock
 from pathlib import Path
 
 import boto3  # type: ignore[import]
@@ -280,77 +281,85 @@ def test_reset_directory_permissions_windows() -> None:
     """
     # GIVEN
     import ntsecuritycon
+    import win32security
 
-    win32security_mock = MagicMock()
-    sys.modules["win32security"] = win32security_mock
-
-    path = Path("C:/test/path")
-    system_sid, admin_sid, user_sid = MagicMock(), MagicMock(), MagicMock()
-    win32security_mock.ConvertStringSidToSid.side_effect = [admin_sid, system_sid]
-    win32security_mock.LookupAccountName.return_value = (user_sid, None, None)
-    dacl = win32security_mock.ACL.return_value
-    sd = win32security_mock.GetFileSecurity.return_value
+    path = Path(tempfile.gettempdir())
+    system_sid = win32security.ConvertStringSidToSid("S-1-5-18")
+    admin_sid = win32security.ConvertStringSidToSid("S-1-5-32-544")
+    user_sid, _, _ = win32security.LookupAccountName(None, getpass.getuser())
+    sids = [system_sid, admin_sid, user_sid]
 
     # WHEN
     config_file._reset_directory_permissions_windows(path)
 
     # THEN
-    dacl.AddAccessAllowedAceEx.assert_has_calls(
-        [
-            call(
-                win32security_mock.ACL_REVISION,
-                ntsecuritycon.OBJECT_INHERIT_ACE | ntsecuritycon.CONTAINER_INHERIT_ACE,
-                ntsecuritycon.GENERIC_ALL,
-                sid,
-            )
-            for sid in [user_sid, admin_sid, system_sid]
-        ],
-        any_order=True,
-    )
-    assert dacl.AddAccessAllowedAceEx.call_count == 3  # Confirm no additional access was added
-    win32security_mock.GetFileSecurity.assert_called_with(
-        str(path.resolve()), win32security_mock.DACL_SECURITY_INFORMATION
-    )
-    sd.SetSecurityDescriptorDacl.assert_called_with(1, dacl, 0)
-    win32security_mock.SetFileSecurity.assert_called_with(
-        str(path.resolve()), win32security_mock.DACL_SECURITY_INFORMATION, sd
-    )
+    sd = win32security.GetFileSecurity(str(path.resolve()), win32security.DACL_SECURITY_INFORMATION)
+    dacl = sd.GetSecurityDescriptorDacl()
+    assert dacl.GetAceCount() == 3
+    assert dacl.GetAclRevision() == win32security.ACL_REVISION
+    for i in range(3):
+        (acetype, aceflags), access, sid = dacl.GetAce(i)
+        assert acetype == win32security.ACCESS_ALLOWED_ACE_TYPE
+        assert aceflags == ntsecuritycon.OBJECT_INHERIT_ACE | ntsecuritycon.CONTAINER_INHERIT_ACE
+        assert access == ntsecuritycon.FILE_ALL_ACCESS
+        try:
+            sids.remove(sid)
+        except ValueError:
+            assert False, f"Unexpected SID: {win32security.ConvertSidToStringSid(sid)}"
 
 
 @pytest.mark.skipif(
     platform.system() != "Windows",
     reason="This test is for testing file permission changes in Windows.",
 )
-@pytest.mark.parametrize("parent_exists", [True, False])
-@patch.object(config_file, "_reset_directory_permissions_windows")
 @patch.object(config_file, "get_config_file_path")
-@patch.object(config_file, "os")
-@patch.object(config_file.tempfile, "mkstemp", return_value=(MagicMock(), MagicMock()))
 def test_write_config_directory_permission_windows(
-    mock_tempfile,
-    mock_os,
     mock_get_config_file_path,
-    mock_reset_directory_permissions,
-    parent_exists,
 ):
+    """
+    Tests that the config directory permissions are not modified when writing to the config file
+    """
     # GIVEN
-    mock_get_config_file_path.return_value = MagicMock()
-    mock_get_config_file_path.return_value.parent.exists.return_value = parent_exists
+    path = Path(tempfile.gettempdir())
+    config_path = path / "config"
+    mock_get_config_file_path.return_value = config_path
+
+    # ----------------------------------------------------------------------------------------------
+    # Sets up a directory with an added full access entry for domain guests. Since this is not a
+    # typically expected entry, it can be used to validate existing permissions were not overwritten
+    import win32security
+    import ntsecuritycon
+
+    sd = win32security.GetFileSecurity(str(path.resolve()), win32security.DACL_SECURITY_INFORMATION)
+    guest_sid = win32security.ConvertStringSidToSid("S-1-5-32-546")  # Domain Guests
+    dacl = sd.GetSecurityDescriptorDacl()
+    dacl.AddAccessAllowedAceEx(
+        win32security.ACL_REVISION,
+        ntsecuritycon.OBJECT_INHERIT_ACE | ntsecuritycon.CONTAINER_INHERIT_ACE,
+        ntsecuritycon.FILE_ALL_ACCESS,
+        guest_sid,
+    )
+    sd.SetSecurityDescriptorDacl(1, dacl, 0)
+    win32security.SetFileSecurity(str(path.resolve()), win32security.DACL_SECURITY_INFORMATION, sd)
+    # ----------------------------------------------------------------------------------------------
 
     # WHEN
     config_file.write_config(MagicMock())
 
     # THEN
-    if parent_exists:
-        mock_get_config_file_path.return_value.parent.mkdir.assert_not_called()
-        mock_reset_directory_permissions.assert_not_called()
-    else:
-        mock_get_config_file_path.return_value.parent.mkdir.assert_called_with(
-            parents=True, exist_ok=True
-        )
-        mock_reset_directory_permissions.assert_called_once_with(
-            mock_get_config_file_path.return_value.parent
-        )
+    new_dacl = win32security.GetFileSecurity(
+        str(path.resolve()), win32security.DACL_SECURITY_INFORMATION
+    ).GetSecurityDescriptorDacl()
+
+    assert new_dacl.GetAceCount() == dacl.GetAceCount()
+    for i in range(dacl.GetAceCount()):
+        # Assert the access control entries are identical
+        (acetype, aceflags), access, sid = dacl.GetAce(i)
+        (new_acetype, new_aceflags), new_access, new_sid = new_dacl.GetAce(i)
+        assert acetype == new_acetype
+        assert aceflags == new_aceflags
+        assert access == new_access
+        assert sid == new_sid
 
 
 @pytest.mark.skipif(
