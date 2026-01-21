@@ -317,6 +317,9 @@ class SubmitJobToDeadlineDialog(QDialog):
             parent=self,
         )
         self.shared_job_settings.parameter_changed.connect(self.on_shared_job_parameter_changed)
+        self.shared_job_settings.deadline_cloud_settings_box.settings_change_requested.connect(
+            self.on_settings_button_clicked
+        )
         self.shared_job_settings_tab.setWidget(self.shared_job_settings)
         self.shared_job_settings_tab.setWidgetResizable(True)
         self.shared_job_settings.parameter_changed.connect(self.on_shared_job_parameter_changed)

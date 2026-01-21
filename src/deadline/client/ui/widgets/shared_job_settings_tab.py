@@ -18,6 +18,7 @@ from qtpy.QtWidgets import (  # type: ignore
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPushButton,
     QRadioButton,
     QSpinBox,
     QVBoxLayout,
@@ -476,6 +477,9 @@ class DeadlineCloudSettingsWidget(QGroupBox):
     UI component for the Deadline Cloud settings.
     """
 
+    # Signal emitted when the user wants to change the Farm/Queue settings
+    settings_change_requested = Signal()
+
     def __init__(self, *, parent: Optional[QWidget] = None):
         super().__init__(tr("Deadline Cloud settings"), parent=parent)
         self.deadline_settings: Dict[str, Any] = {"counter": -1}
@@ -495,11 +499,31 @@ class DeadlineCloudSettingsWidget(QGroupBox):
         """
         self.farm_box_label = QLabel(tr("Farm"))
         self.farm_box = DeadlineFarmDisplay()
-        self.layout.addRow(self.farm_box_label, self.farm_box)
+        farm_row_widget = QWidget()
+        farm_row_layout = QHBoxLayout(farm_row_widget)
+        farm_row_layout.setContentsMargins(0, 0, 0, 0)
+        farm_row_layout.addWidget(self.farm_box, stretch=1)
+        self.farm_change_button = QPushButton(tr("Change..."))
+        self.farm_change_button.setToolTip(tr("Open settings to select a different farm"))
+        self.farm_change_button.clicked.connect(self._on_change_clicked)
+        farm_row_layout.addWidget(self.farm_change_button)
+        self.layout.addRow(self.farm_box_label, farm_row_widget)
 
         self.queue_box_label = QLabel(tr("Queue"))
         self.queue_box = DeadlineQueueDisplay()
-        self.layout.addRow(self.queue_box_label, self.queue_box)
+        queue_row_widget = QWidget()
+        queue_row_layout = QHBoxLayout(queue_row_widget)
+        queue_row_layout.setContentsMargins(0, 0, 0, 0)
+        queue_row_layout.addWidget(self.queue_box, stretch=1)
+        self.queue_change_button = QPushButton(tr("Change..."))
+        self.queue_change_button.setToolTip(tr("Open settings to select a different queue"))
+        self.queue_change_button.clicked.connect(self._on_change_clicked)
+        queue_row_layout.addWidget(self.queue_change_button)
+        self.layout.addRow(self.queue_box_label, queue_row_widget)
+
+    def _on_change_clicked(self):
+        """Handle click on Change button to open settings dialog."""
+        self.settings_change_requested.emit()
 
     def refresh_setting_controls(self, deadline_authorized):
         """
